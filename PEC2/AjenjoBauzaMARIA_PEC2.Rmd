@@ -1,0 +1,548 @@
+---
+title: "PEC 2: Gene expression patterns of phenotypes subclasses using gene expression profiling and artificial neural networks"
+author: "María Ajenjo Bauzá"
+date: "15/12/2020"
+output:
+  bookdown::pdf_document2:
+    toc: yes
+    number_sections: yes
+    latex_engine: lualatex
+  html_document:
+    toc: yes
+    df_print: paged
+  bookdown::html_document2:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+nocite: '@*'
+bibliography: scholarpec.bib
+params:
+  p.train: !r 2/3
+  seed.train: 12345
+  seed.clsfier: 1234567
+  folder.data: datafiles
+  file.data: data6.csv
+  file.class: class6.csv
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, message=FALSE, echo=FALSE, warning=FALSE}
+libraries <- c("neuralnet", "NeuralNetTools", "ggplot2" ,"caret", "stats",
+               "FactoMineR", "factoextra", "e1071", "kernlab", "tidyverse")
+check.libraries <- is.element(libraries, installed.packages()[, 1])==FALSE
+libraries.to.install <- libraries[check.libraries]
+if (length(libraries.to.install!=0)) {
+  install.packages(libraries.to.install)
+}
+
+success <- sapply(libraries,require, quietly = FALSE,  character.only = TRUE)
+if(length(success) != length(libraries)) {stop("A package failed to return a success in require() function.")}
+```
+
+\pagebreak
+
+# Algoritmo Red Neuronal Artificial
+
+## Funcionamiento y características
+
+Las redes neuronales artificiales se inspiran en las redes neuronales biológicas, las del cerebro. Así como el cerebro utiliza una red de neuronas interconectadas entre sí, el algoritmo ANN utiliza una red de neuronas artificiales, también denominadas "nodos", para resolver problemas de aprendizaje.
+
+Cada neurona tiene conexiones de entrada, a través de las que recibe valores de entrada. Con estos valores, la neurona realizará un cálculo y generará un valor de salida. Por tanto, una neurona es como una función matemática. Esa función consiste en una suma ponderada de los valores de entrada, donde la ponderación correrá a cargo de los pesos asignados a cada variable o parámetros de nuestro modelo.
+
+La red neuronal se crea mediante diferente capas interconectadas. De esta manera se logra un aprendizaje jerarquizado. En cada capa hay neuronas que reciben la información de la capa anterior, la procesan, y la transmiten a la capa siguiente. A la primera capa se le denomina "capa de entrada", a la última, "capa de salida", y a las intermedias, "capas ocultas".
+
+
+**CARACTERÍSTICAS DE LAS REDES NEURONALES ARTIFICIALES:**
+
+- Algoritmo de entrenamiento: Establece cómo se distribuyen los pesos de las conexiones para inhibir o estimulas las neuronas en proporción de la señal de entrada.
+
+
+- Topología o arquitectura de la red: número de capas y nodos, así como la dirección en la que se transmite la información dentro de las capas o entre capas.
+
+
+- Función de activación: distorsiona el valor de salida, añadiéndole deformaciones no lineales. Hay diferentes tipos de funciones de activación: 
+
+  * Función escalonada: para un valor de entrada mayor al umbral el output es 1. Para un valor inferior, será igual a 0.
+  
+  
+  * Función sigmoide: hace que los valores muy grandes se saturen en 1 y que los muy pequeños se saturen en 0.
+  
+  
+  * Función Tanh: similar a la sigmoide pero con un rango de -1 a 1.
+  
+  
+  * Función RELU: Unidad Rectificada Lineal. Se comporta como una función lineal positiva cuando el valor de entrada es positivo y como constante a 0 cuando el valor de entrada es negativo.
+
+
+
+## Tabla de fortalezas y debilidades
+
+```{r, echo=FALSE}
+sw_ann <- data.frame("Fortalezas" = c(
+                        "Adaptable a clasificación o problemas de predicción numérica",
+                        "Capaz de modelar patrones más complejos que casi cualquier otro algoritmo",
+                        "No necesita muchas restricciones acerca de las relaciones subyacentes de los datos"), 
+                    "Debilidades" = c(
+                        "Requiere de gran potencia computacional y en general es de aprendizaje lento, particularmente si la topología es compleja", 
+                        "Propenso a sobreajustar los datos de entrenamiento", 
+                        "Es un modelo de caja negra complejo que es difícil, si no imposible, de interpretar."))
+
+knitr::kable(sw_ann, "pipe", caption = "Strengths and Weaknesses of the Artificial Neural Network algorithm")
+```
+
+## Implementación del algoritmo
+
+```{r}
+# Lectura de los ficheros de partida
+class <- read.csv(file = file.path(params$folder.data, params$file.class))
+data <- read.csv(file = file.path(params$folder.data, params$file.data))
+head(data)[,1:6]
+```
+
+### Análisis de Componentes Principales o PCA
+
+En primer lugar, exploraremos los datos.
+
+```{r}
+# Exploración de los datos
+dim(data)
+```
+
+```{r}
+# Media de la expresión de cada gen (muestra de los 10 primeros). 
+# (MARGIN = 2 para que se aplique la función a las columnas)
+apply(X = data, MARGIN = 2, FUN = mean)[1:10]
+```
+
+```{r}
+# Varianza de la expresión de cada gen (muestra de los 10 primeros)
+apply(X = data, MARGIN = 2, FUN = var)[1:10]
+```
+
+Posteriormente, hemos de estandarizar las variables para que tengan desviación estándar de 1 y media de 0 y aplicar el PCA. Con el parámetro scale = TRUE de la función prcomp() indicamos que queremos escalar las variables para que tengan desviación estándar de 1.
+
+```{r}
+data_pca <- prcomp(data, scale = TRUE)
+head(data_pca$rotation)[, 1:5]
+```
+```{r}
+dim(data_pca$rotation)
+```
+
+Hay 102 componentes principales distintas. Observamos el vector de los scores y la desviación estándar de cada componente principal:
+
+```{r}
+# Scores
+head(data_pca$x)[, 1:5]
+# Desviación estándar
+data_pca$sdev
+```
+
+```{r}
+summary(data_pca)
+```
+
+```{r}
+fviz_pca_ind(data_pca, geom.ind = "point", 
+             col.ind = "#FC4E07", 
+             axes = c(1, 2), 
+             pointsize = 1.5) 
+```
+
+
+Por último, pasaremos a un nuevo dataframe los datos que hemos obtenido tras el PCA.
+
+```{r}
+pca_data <- data_pca$x
+pca_data <- as.data.frame(pca_data)
+```
+
+
+### Normalización de las variables
+
+En primer lugar observamos algunas de las primeras componentes del análisis, en concreto las 8 primeras.
+
+```{r}
+# Observamos las 8 primeras componentes principales
+boxplot(pca_data[,1:8],
+        main='Datos sin normalizar',
+        col='brown',cex.axis=0.4,subset=pca_data)
+abline(h=5,lwd=2)
+```
+
+
+Hay que normalizar las variables para que tomen valores entre 0 y 1. Definimos la función normalize() para realizar esta operación.
+
+```{r}
+# Definimos función de normalización
+normalize <- function(x) {
+return((x - min(x)) / (max(x) - min(x)))
+}
+
+# Normalizamos los datos
+data_norm <- as.data.frame(lapply(pca_data,normalize))
+```
+
+Confirmamos que el rango de valores esta entre 0 y 1.
+
+```{r}
+summary(data_norm)[,1:8]
+```
+
+
+## Separación de los datos en train y test
+
+Antes de partir los datos en train y test, añadiremos los datos del fichero class6.csv al dataframe con el que estamos trabajando. Para ello creamos 4 variables binarias, una para cada uno de los fenotipos marcados en el fichero class6.csv.
+
+```{r}
+# Creamos variables binarias para cada categoría
+data_ann <- cbind(data_norm, class)
+data_ann$FNT1 <- class$x == 1
+data_ann$FNT2 <- class$x == 2
+data_ann$FNT3 <- class$x == 3
+data_ann$FNT4 <- class$x == 4
+data_ann$x <- factor(data_ann$x, levels = c(1,2,3,4),
+                labels = c("FNT1","FNT2","FNT3","FNT4"))
+```
+
+Dado que la semilla aleatoria (12345) ha sido indicada en los parámetros de este archivo, separaremos ahora los datos en dos grupos, el 67% (2/3) de los datos irá para el entrenamiento del modelo (train) y el otro 33% (1/3) para probar el modelo (test).
+
+```{r}
+# n será el número de filas del conjunto total de datos
+n <- nrow(data_ann)
+
+# Fijamos la semilla de aleatoriedad
+set.seed(params$seed.train)
+
+# Partimos los datos en train y test
+# n_train = 2/3 = params$p.train
+train <- sample(n,floor(n*params$p.train))
+data_ann.train <- data_ann[train,]
+data_ann.test  <- data_ann[-train,]
+```
+
+```{r}
+# Comprobamos que hemos partido bien los datos
+dim(data_ann.train)
+dim(data_ann.test)
+```
+
+## Modelos de red neuronal artificial de una sola capa oculta
+
+Antes de la creación de los modelos, fijaremos la semilla generadora:
+
+```{r}
+set.seed(params$seed.clsfier)
+```
+
+
+### De un nodo
+
+```{r}
+# especificamos la fórmula
+formula_ann <- FNT1+FNT2+FNT3+FNT4 ~ PC1+PC2+PC3+PC4+PC5+PC6+PC7+PC8
+# construimos el modelo
+model_ann1 <- neuralnet(formula_ann,
+                        data = data_ann.train, hidden = 1,
+                        linear.output = FALSE)
+# visualizamos el modelo
+plot(model_ann1, rep = "best")
+```
+
+```{r}
+# visualizamos con el paquete NeuralNetTools
+plotnet(model_ann1)
+```
+
+**PREDICCIÓN Y EVALUACIÓN DEL MODELO**
+
+```{r}
+model_ann1_results <- neuralnet::compute(model_ann1,
+                                         data_ann.test[,1:8])$net.result
+
+# Transformamos el output binario a categórico
+maxidx <- function(arr){
+  return(which(arr == max(arr)))
+}
+
+idx <- apply(model_ann1_results[,-107], 1, maxidx)
+prediction_1 <- c("FNT1","FNT2","FNT3","FNT4")[idx]
+results1 <- table(prediction_1, data_ann.test$x)
+
+# Confusion matrix
+cmatrix1 <- confusionMatrix(results1)
+cmatrix1
+```
+
+
+### De tres nodos
+
+```{r}
+# construimos el modelo
+model_ann3 <- neuralnet(formula_ann,
+                        data = data_ann.train, hidden = 3,
+                        linear.output = FALSE)
+# visualizamos el modelo
+plot(model_ann3, rep = "best")
+```
+
+```{r}
+# visualizamos con el paquete NeuralNetTools
+plotnet(model_ann3)
+```
+
+
+**PREDICCIÓN Y EVALUACIÓN DEL MODELO**
+
+```{r}
+model_ann3_results <- neuralnet::compute(model_ann3,
+                                         data_ann.test[,1:8])$net.result
+
+# Transformamos el output binario a categórico con la función de antes
+idx <- apply(model_ann3_results[,-107], 1, maxidx)
+prediction_3 <- c("FNT1","FNT2","FNT3","FNT4")[idx]
+results3 <- table(prediction_3, data_ann.test$x)
+
+# Confusion matrix
+cmatrix3 <- confusionMatrix(results3)
+cmatrix3
+```
+
+
+## Modelo nnet del paquete caret
+
+```{r}
+model_nnet <- train(x ~ PC1+PC2+PC3+PC4+PC5+PC6+PC7+PC8,
+                    data = data_ann.train,
+                    method = "nnet",
+                    trControl = trainControl(method = "cv", number = 3),
+                    tuneGrid = NULL, tuneLength = 3, trace = FALSE)
+plotnet(model_nnet)
+```
+
+```{r}
+summary(model_nnet)
+```
+
+```{r}
+prediction_nnet <- predict(model_nnet, data_ann.test)
+results_nnet <- table(prediction_nnet, data_ann.test$x)
+results_nnet
+```
+```{r}
+cmatrixnet <- confusionMatrix(results_nnet)
+cmatrixnet
+```
+
+
+
+## Resultados y discusión
+
+```{r}
+# Modelo de 1 capa oculta con 1 neurona
+cmatrix1
+
+# Modelo de 1 capa oculta con 3 neuronas
+cmatrix3
+```
+
+
+Al observar los resultados de los modelos realizados mediante la función neuralnet(), parece que el modelo con 3 neuronas en la capa oculta clasifica mejor los 4 fenotipos. En concreto, este modelo tiene una tasa de éxito o _accuracy_ del 97%, que difiere del 76.5% del modelo con una sola neurona. Además el modelo con 3 neuronas presenta mejor sensibilidad y especificidad que el modelo de una neurona. Esto tiene sentido, ya que si tenemos más neuronas, se podrán aprender a clasificar mejor los datos y por tanto ajustar mejor las predicciones.
+
+
+```{r}
+# Modelo con nnet del paquete caret
+cmatrixnet
+```
+
+
+En cuanto al modelo con la función nnet() paquete caret, 3-fold cross validation y 3 nodos en la capa oculta, obtenemos prácticamente las mismas estadísticas que en el modelo con la función neuralnet() y 3 neuronas en la capa oculta. En ambos casos se obtienen valores similares de especificidad y sensibilidad en las 4 clases y un buen valor de accuracy (97%).
+
+Para este número de datos no obtenemos diferencias entre el modelo creado con la función neuralnet() y el modelo nnet() del paquete caret con 3-fold cross validation. Es posible que con un mayor número de datos sí que se observaran diferencias.
+
+
+\pagebreak
+
+# Algoritmo Support Vector Machine
+
+## Funcionamiento y características
+
+Se trata de un algoritmo de aprendizaje supervisado que se suele utilizar como clasificador discriminatorio, ya que separa los datos creando un hiperplano. Dados los datos de entrenamiento etiquetados, el algoritmo genera un hiperplano óptimo para clasificar los nuevos ejemplos.
+
+Se fundamentan en el _Mazimal Margin Classifier_, que a su vez se basa en el concepto de hiperplano.
+
+
+Si los datos no pueden separarse de manera lineal se utilizan los _kernels_ y se especifica un parámetro C para minimizar la función de coste. Existen varios tipos de kernels:
+
+
+- Lineal
+
+
+- Polinomial
+
+
+- Gaussiano
+
+
+- Tangente hiperbólica sigmoide
+
+
+
+
+## Tabla de fortalezas y debilidades
+
+```{r, echo=FALSE}
+sw_svm <- data.frame("Fortalezas" = c(
+                        "Puede utilizarse para clasificación o problemas de predicción numérica",
+                        "No está excesivamente influenciado por datos de ruido y datos que no son propensos al sobreajuste",
+                        "Puede ser más fácil de usar que las redes neuronales, paricularmente debido a la existencia de varios algoritmos SVM bien soportados",
+                        "Están ganando popularidad debido a su alta precisión y si alto perfil de victorias en competiciones de minería de datos"), 
+                    "Debilidades" = c(
+                        "Encontrar el mejor modelo requiere probar varias combinaciones de kernels y parámetros del modelo", 
+                        "El entrenamiento puede ser lento, particularmente si el conjunto de datos de partida tiene un gran número de características", 
+                        "Es un modelo complejo de caja negra que es difícil, si no imposible, de interpretar", 
+                        ""))
+
+knitr::kable(sw_svm, "pipe", caption = "Strengths and Weaknesses of the SVM algorithm")
+```
+
+
+## Implementación del algoritmo
+
+```{r}
+# Lectura de los ficheros de partida
+class <- read.csv(file = file.path(params$folder.data, params$file.class))
+data <- read.csv(file = file.path(params$folder.data, params$file.data))
+head(data)[,1:6]
+```
+
+```{r}
+# Añadimos la columna class al dataset data
+data <- cbind(data,class)
+dim(data)
+```
+```{r}
+# Pasamos a factor la nueva columna añadida
+data$x <- factor(data$x, levels = c(1,2,3,4),
+                labels = c("FNT1","FNT2","FNT3","FNT4"))
+data$x
+str(data$x)
+```
+
+
+### Separación de los datos en train y test
+
+Dado que la semilla aleatoria (12345) ha sido indicada en los parámetros de este archivo, separaremos ahora los datos en dos grupos, el 67% (2/3) de los datos irá para el entrenamiento del modelo (train) y el otro 33% (1/3) para probar el modelo (test).
+
+```{r}
+# n será el número de filas del conjunto total de datos
+n <- nrow(data)
+
+# Fijamos la semilla de aleatoriedad
+set.seed(params$seed.train)
+
+# Partimos los datos en train y test
+# n_train = 2/3 = params$p.train
+train <- sample(n,floor(n*params$p.train))
+data_svm.train <- data[train,]
+data_svm.test  <- data[-train,]
+```
+
+```{r}
+# Comprobamos que hemos partido bien los datos
+dim(data_svm.train)
+dim(data_svm.test)
+```
+
+
+### Modelo SVM lineal
+
+Antes de nada, fijamos la nueva semilla de aleatoriedad.
+
+```{r}
+# Fijamos la nueva semilla de aleatoriedad
+set.seed(params$seed.clsfier)
+```
+
+**ENTRENAMIENTO MODELO**
+
+```{r}
+clasific_lineal <- ksvm(x ~ ., data = data_svm.train,
+                        kernel = "vanilladot")
+clasific_lineal
+```
+
+**EVALUACIÓN MODELO**
+
+```{r}
+predictions_lineal <- predict(clasific_lineal, data_svm.test)
+prop.table(table(predictions_lineal, data_svm.test$x))
+```
+
+
+### Modelo SVM RBF
+
+**ENTRENAMIENTO MODELO**
+
+```{r}
+clasific_rbf <- ksvm(x ~ ., data = data_svm.train,
+                        kernel = "rbfdot")
+clasific_rbf
+```
+
+**EVALUACIÓN MODELO**
+
+```{r}
+predictions_rbf <- predict(clasific_rbf, data_svm.test)
+prop.table(table(predictions_rbf, data_svm.test$x))
+```
+
+
+### Modelo svmLinear paquete caret
+
+```{r}
+# Configuración 3-fold Cross Validation
+train_control <- trainControl(method = "cv", number = 3)
+
+# Ajuste del modelo
+model_svmLinear <- train(x ~ ., data = data, method = "svmLinear",
+                   trControl = train_control,
+                   preProcess = c("center", "scale"))
+model_svmLinear
+```
+
+Mediante la utilización del parámetro preProcess dentro de la función train() hemos normalizado los datos y los hemos puesto en una escala para que sean comparables entre sí.
+
+El parámetro C, que por defecto tiene valor 1, hace referencia al "coste" y determina los posibles errores de clasificación. 
+
+
+### Resultados y discusión
+
+En primer lugar, observaremos las matrices de confusión para ver cómo se comportan los diferentes modelos.
+
+```{r}
+# Modelo SVM lineal
+matrix_lineal <- confusionMatrix(predictions_lineal, data_svm.test$x)
+matrix_lineal
+```
+
+```{r}
+# Modelo SVM RBF
+matrix_rbf <- confusionMatrix(predictions_rbf, data_svm.test$x)
+matrix_rbf
+```
+
+```{r}
+# Modelo svmLinear
+model_svmLinear
+```
+
+En los tres modelos, la tasa de éxito es prácticamente idéntica, de en torno al 97%. El valor kappa también es muy bueno, del 96% en los tres. En los modelos SVM de los que obtenemos más características para ayudarnos a analizar su comportamiento observamos que se comportan prácticamente igual, diferenciándose en que los dos se equivocan en una predicción de la clase 3. Por tanto, parece que los tres modelos clasifican de igual manera los datos de los que disponemos, siendo esta una clasificación bastante buena.
+
+
+
+# Referencias

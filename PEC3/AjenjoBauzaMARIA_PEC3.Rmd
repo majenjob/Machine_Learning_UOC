@@ -1,0 +1,839 @@
+---
+title: "PEC 3: Predicción de secuencias promotoras en E.coli"
+author: "María Ajenjo Bauzá"
+date: "11/1/2021"
+output:
+  bookdown::pdf_document2:
+    toc: yes
+    number_sections: yes
+    latex_engine: lualatex
+  html_document:
+    toc: yes
+    df_print: paged
+  bookdown::html_document2:
+    df_print: paged
+    toc: yes
+    toc_float: yes
+    number_sections: yes
+nocite: '@*'
+bibliography: scholarpec.bib
+params:
+  p.train: !r 2/3
+  seed.train: 123
+  seed.clsfier: 1234567
+  folder.data: datafiles
+  file.data: promoters.txt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NULL, cache = TRUE)
+```
+
+```{r packages, message=FALSE, echo=FALSE, warning=FALSE}
+libraries <- c("neuralnet", "NeuralNetTools", "ggplot2" ,"caret", "stats",
+               "FactoMineR", "factoextra", "e1071", "kernlab", "tidyverse",
+               "hash", "class", "gmodels", "pROC", "ROCR", "C50", "randomForest")
+check.libraries <- is.element(libraries, installed.packages()[, 1])==FALSE
+libraries.to.install <- libraries[check.libraries]
+if (length(libraries.to.install!=0)) {
+  install.packages(libraries.to.install)
+}
+
+success <- sapply(libraries,require, quietly = FALSE,  character.only = TRUE)
+if(length(success) != length(libraries)) {stop("A package failed to return a success in require() function.")}
+```
+
+\pagebreak
+
+# Lectura y transformación de los datos
+
+Se realiza la lectura de los datos.
+
+```{r}
+promotores <- read.csv(file = file.path(params$folder.data, params$file.data),
+                       header = FALSE,
+                       col.names = c("class", "name_seq", "sequence"))
+head(promotores)
+```
+
+
+## Codificación one-hot
+
+En primer lugar, se creará un diccionario en el que las claves sean los 4 nucleótidos posibles y los valores serán las representaciones en 1 y 0 correspondientes a cada uno.
+
+```{r}
+# Se crea el diccionario
+dict_nucl <- hash()
+# Se añaden los valores
+dict_nucl['t'] <- c(1,0,0,0)
+dict_nucl['c'] <- c(0,1,0,0)
+dict_nucl['g'] <- c(0,0,1,0)
+dict_nucl['a'] <- c(0,0,0,1)
+dict_nucl
+```
+
+Posteriormente, se creará una función que tome como argumento el diccionario creado anteriormente y el fichero en el que se encuentren los promotores que queramos codificar.
+
+
+```{r}
+# Argumentos: diccionario nucleótidos y fichero con seq a codificar (tabla)
+onehot_encoding <- function(dict_nucleotides, file){
+  # Se crea una tabla vacía con 228 columnas (57*4)
+  nucl_table <- matrix(ncol = 228)
+  # Para cada fila de la columna 3 del fichero
+  for (row in 1:length(file[,3])){
+    # La secuencia será el valor de esa fila y la columna 3
+    seq = file[row,3]
+    # Se crea una lista vacía donde añadir el resultado de la codificación
+    lista <- c()
+    # Se parte la secuencia en sus diferentes nucleótidos
+    prom_split <- strsplit(seq,"")[[1]]
+    # Para cada nucleótido de los de la secuencia
+    for (nucl in prom_split){
+      # Se añade a la lista el resultado de la codificación
+      lista = append(lista, dict_nucleotides[[nucl]])
+    }
+    # Se añade a la tabla el resultado de la codificación
+    nucl_table <- rbind(nucl_table, lista)
+  }
+  # Se elimina la primera fila vacía de la matriz nueva para que no aparezcan
+  # los NA que aparecían al crear la matriz
+  nucl_table <- nucl_table[-1,]
+  # Se pasa de matriz a data.frame
+  nucl_table <- as.data.frame(nucl_table)
+  # Se juntan la nueva tabla y el fichero
+  file <- cbind(file, nucl_table)
+}
+```
+
+Ahora utilizaremos la función para realizar la codificación one-hot de nuestros promotores.
+
+```{r}
+prom_oh <- onehot_encoding(dict_nucl, promotores)
+head(prom_oh)[1:6]
+# Comprobamos que las dimensiones sean correctas
+dim(prom_oh)
+```
+
+
+## Separación de los datos en train y test
+
+En primer lugar, realizamos algunas modificaciones pertinentes en nuestro dataset.
+
+```{r}
+# Eliminamos las columnas 2 y 3 correspondientes al nombre y a la secuencia
+prom_oh <- prom_oh[c(-2,-3)]
+
+# Pasamos a factor la variable class
+prom_oh$class <- factor(prom_oh$class)
+```
+
+Ahora procedemos a la separación en train y test.
+
+```{r}
+# n es el número de filas del conjunto total de datos
+n <- nrow(prom_oh)
+
+# Fijamos la semilla de aleatoriedad
+set.seed(params$seed.train)
+
+# Dividimos los datos en train y test
+# n_train = 2/3 = params$p.train
+train <- sample(n,floor(n*params$p.train))
+data_train <- prom_oh[train,]
+data_test  <- prom_oh[-train,]
+
+# Comprobamos que los datos se han partido bien
+dim(data_train)
+dim(data_test)
+head(data_train)[1:6]
+```
+
+Ahora tenemos las columnas de las secuencias codificadas junto a la columna "class", que muestra la clase (si son secuencias promotoras, +, o no). Pero en algunos algoritmos debemos tener los datos sin esta columna, por lo que prepararemos los datasets necesarios para esos algoritmos. Necesitaremos también unas variables donde almacenar estos valores.
+
+```{r}
+# Variables con las clases de los datos
+data_train_labels <- data_train$class
+data_test_labels <- data_test$class
+
+# Datasets sin etiquetar
+data_train_nolab <- data_train[-1]
+data_test_nolab <- data_test[-1]
+```
+
+\pagebreak
+
+
+# Aplicación de diferentes algoritmos para la clasificación de datos de secuencias promotoras
+
+## k-Nearest Neighbour (k-NN)
+
+### Entrenamiento del modelo
+
+  ***k = 1***
+
+```{r}
+k = 1
+pred_test_1 <- knn(train = data_train_nolab, test = data_test_nolab,
+                   cl = data_train_labels, k = k, prob = TRUE)
+
+# Se almacenan los valores de probabilidad de cada predicción obtenida
+knn_scores1 <- attr(pred_test_1, "prob")
+```
+
+Dado que el algoritmo knn (función knn()) da la probabilidad de ser la clase ganadora, debemos transformar la probabilidad de la clase que no sea la ganadora para obtener las probabilidades para poder hacer la curva ROC correctamente. En este caso y según se marca el enunciado, la clase ganadora es la codificada como
+"+", es decir, el promotor.
+
+```{r}
+knn_scores1[pred_test_1 == "+"] <- 1 - knn_scores1[pred_test_1 == "+"]
+```
+
+
+  ***k = 3***
+
+```{r}
+k = 3
+pred_test_3 <- knn(train = data_train_nolab, test = data_test_nolab,
+                   cl = data_train_labels, k = k, prob = TRUE)
+
+# Se almacenan los valores de probabilidad de cada predicción obtenida
+knn_scores3 <- attr(pred_test_3, "prob")
+
+knn_scores3[pred_test_3 == "+"] <- 1 - knn_scores3[pred_test_3 == "+"]
+```
+
+
+  ***k = 5***
+
+```{r}
+k = 5
+pred_test_5 <- knn(train = data_train_nolab, test = data_test_nolab,
+                   cl = data_train_labels, k = k, prob = TRUE)
+
+# Se almacenan los valores de probabilidad de cada predicción obtenida
+knn_scores5 <- attr(pred_test_5, "prob")
+
+knn_scores5[pred_test_5 == "+"] <- 1 - knn_scores5[pred_test_5 == "+"]
+```
+
+
+
+  ***k = 7***
+
+```{r}
+k = 7
+pred_test_7 <- knn(train = data_train_nolab, test = data_test_nolab,
+                   cl = data_train_labels, k = k, prob = TRUE)
+
+# Se almacenan los valores de probabilidad de cada predicción obtenida
+knn_scores7 <- attr(pred_test_7, "prob")
+
+knn_scores7[pred_test_7 == "+"] <- 1 - knn_scores7[pred_test_7 == "+"]
+```
+
+
+### Predicción y evaluación
+
+  ***k = 1***
+
+Realizamos ahora la matriz de confusión.
+
+```{r}
+# Matriz de confusión
+conf_matrix1 <- confusionMatrix(pred_test_1, data_test_labels,
+                                positive = "+",
+                                dnn = c("Predicted", "Actual"))
+conf_matrix1
+```
+
+También evaluaremos el modelo a través de la curva ROC.
+
+```{r}
+roc_curve1 <- roc(data_test_labels, knn_scores1, plot = TRUE, legacy.axes = TRUE,
+                 percent = TRUE, xlab = "Especificidad (%)",
+                 ylab = "Sensibilidad (%)", col = "#A02FF0", lwd = 4,
+                 print.auc = TRUE, print.auc.x = 45,
+                 auc.polygon = TRUE, auc.polygon.col = "#D1B1F0",
+                 auc = TRUE, main = "k = 1")
+```
+
+
+  ***k = 3***
+
+```{r}
+# Matriz de confusión
+conf_matrix3 <- confusionMatrix(pred_test_3, data_test_labels,
+                                positive = "+",
+                                dnn = c("Predicted", "Actual"))
+conf_matrix3
+```
+
+
+```{r}
+# Curva ROC
+roc_curve3 <- roc(data_test_labels, knn_scores3, plot = TRUE, legacy.axes = TRUE,
+                 percent = TRUE, xlab = "Especificidad (%)",
+                 ylab = "Sensibilidad (%)", col = "#212EF0", lwd = 4,
+                 print.auc = TRUE, print.auc.x = 45,
+                 auc.polygon = TRUE, auc.polygon.col = "#92CBD9",
+                 auc = TRUE, main = "k = 3")
+```
+
+
+  ***k = 5***
+
+```{r}
+# Matriz de confusión
+conf_matrix5 <- confusionMatrix(pred_test_5, data_test_labels,
+                                positive = "+",
+                                dnn = c("Predicted", "Actual"))
+conf_matrix5
+```
+
+
+```{r}
+# Curva ROC
+roc_curve5 <- roc(data_test_labels, knn_scores5, plot = TRUE, legacy.axes = TRUE,
+                 percent = TRUE, xlab = "Especificidad (%)",
+                 ylab = "Sensibilidad (%)", col = "#188C22", lwd = 4,
+                 print.auc = TRUE, print.auc.x = 45,
+                 auc.polygon = TRUE, auc.polygon.col = "#ADF09F",
+                 auc = TRUE, main = "k = 5")
+```
+
+
+  ***k = 7***
+  
+```{r}
+# Matriz de confusión
+conf_matrix7 <- confusionMatrix(pred_test_7, data_test_labels,
+                                positive = "+",
+                                dnn = c("Predicted", "Actual"))
+conf_matrix7
+```
+
+
+```{r}
+# Curva ROC
+roc_curve7 <- roc(data_test_labels, knn_scores7, plot = TRUE, legacy.axes = TRUE,
+                 percent = TRUE, xlab = "Especificidad (%)",
+                 ylab = "Sensibilidad (%)", col = "orange", lwd = 4,
+                 print.auc = TRUE, print.auc.x = 45,
+                 auc.polygon = TRUE, auc.polygon.col = "yellow",
+                 auc = TRUE, main = "k = 7")
+```
+
+### Conclusión algoritmo
+
+En primer lugar, realizaremos una tabla comparativa en la que se verán los principales valores (en porcentaje) a comparar de forma visual.
+
+| k | AUC | Accuracy | Error rate | Sensivity | Specificity | Kappa |
+|---|-----|----------|------------|-----------|-------------|-------|
+| 1 | 77.3 | 74.29 | 25.71  | 94.12 | 55.56 | 49.11 |
+| 3 | 87.1 | 80.0 | 20.0 | 88.24 | 72.22 | 60.16 |
+| 5 | 90.8 | 71.43 | 28.57 | 88.24 | 55.56 | 43.37 |
+| 7 | 89.2 | 82.86 | 17.14 | 94.12 | 72.22 | 65.91 |
+
+
+Tras observar detenidamente los resultados obtenidos y compararlos, podríamos aventurarnos a decir que de las cuatro k's probadas, k = 7 es la que mejores resultados obtiene, ya que es con la que se obtiene la mayor tasa de éxito (y por tanto, menor tasa de error). Además, presenta unos buenos valores de sensibilidad, especificidad AUC y el mejor valor del estadístico kappa.
+
+
+\pagebreak
+
+## Naive Bayes
+
+### Entrenamiento modelo
+
+```{r}
+# Construcción del clasificador con laplace = 0
+bayes0 <- naiveBayes(class ~ .,
+                     data = data_train,
+                     data_train_labels,
+                     laplace = 0)
+
+# Construcción del clasificador con laplace = 1
+bayes1 <- naiveBayes(class ~ .,
+                     data = data_train,
+                     data_train_labels,
+                     laplace = 1)
+```
+
+
+### Predicción y evaluación
+
+```{r}
+pred_bayes0 <- predict(bayes0, data_test)
+pred_bayes1 <- predict(bayes1, data_test)
+```
+
+Utilizaremos la función confusionMatrix() del paquete caret para construir la tabla de validación cruzada que nos servirá para la evaluación del algoritmo.
+
+```{r}
+# Para Laplace = 0
+confusionMatrix(pred_bayes0, data_test_labels,
+                positive = "+",
+                dnn = c("Predicted", "Actual"))
+```
+
+```{r}
+# Para Laplace = 1
+confusionMatrix(pred_bayes1, data_test_labels,
+                positive = "+",
+                dnn = c("Predicted", "Actual"))
+```
+
+**CURVAS ROC**
+
+
+- Para Laplace = 0:
+
+
+En primer lugar, se obtienen las probabilidades de ser o no promotor ("+").
+
+```{r}
+test_pred <- predict(bayes0, data_test_nolab, type = "raw")
+tail(test_pred)
+```
+
+Con la información de las probabilidades de la clase positiva ("+") se construye la curva ROC.
+
+```{r}
+pred <- prediction(predictions = test_pred[,2], labels = data_test_labels)
+perf <- performance(pred, measure = "tpr", x.measure = "fpr")
+
+plot(perf, main = "ROC curve Laplace = 0", col = "blue", lwd=3, colorize = TRUE)
+abline(a=0, b=1, lwd=2, lty=2)
+```
+
+```{r}
+# Área bajo la curva
+perf.auc <- performance(pred, measure ="auc")
+perf.auc@y.values
+```
+
+El area bajo la curva es **`r unlist(perf.auc@y.values)`**.
+
+
+- Para Laplace = 1:
+
+
+```{r}
+# Calculamos probabilidades
+test_pred1 <- predict(bayes1, data_test_nolab, type = "raw")
+tail(test_pred1)
+```
+
+
+```{r}
+# Calculamos probabilidad clase positiva y construimos curva ROC
+pred1 <- prediction(predictions = test_pred1[,2], labels = data_test_labels)
+perf1 <- performance(pred1, measure = "tpr", x.measure = "fpr")
+
+plot(perf1, main = "ROC curve Laplace = 1", col = "red", lwd=3, colorize = TRUE)
+abline(a=0, b=1, lwd=2, lty=2)
+```
+
+```{r}
+# Área bajo la curva
+perf.auc1 <- performance(pred1, measure = "auc")
+perf.auc1@y.values
+```
+
+El area bajo la curva es **`r unlist(perf.auc1@y.values)`**.
+
+
+### Conclusión algoritmo
+
+Tal y como se puede observar, tanto con Laplace activado (Laplace = 1) como desactivado (Laplace = 0), se obtienen los mismos resultados. Los resultados son los siguientes:
+
+| Laplace | AUC | Accuracy | Error rate | Sensivity | Specificity | Kappa |
+|---------|-----|----------|------------|-----------|-------------|-------|
+| 0 | 88.57 | 93.79 | 11.43 | 82.35 | 94.44 | 77.05 |
+| 1 | 88.57 | 93.79 | 11.43 | 82.35 | 94.44 | 77.05 |
+
+
+Esto puede ser debido a que los datos contengan ya de por sí combinaciones de todas las variables posibles. Por tanto, no tiene sentido aplicar Laplace, ya que se encarga de que cada combinación de factores aparezca al menos una vez. En cuanto a los resultados, se obtienen buenos valores de los parámetros que miden el rendimiento del algoritmo, por lo que se podría decir que el algoritmo funciona bien para la clasificación de estos datos.
+
+
+\pagebreak
+
+## Artificial Neural Network
+
+En este caso, los datos ya están normalizados, puesto que el mínimo es 0 y el máximo 1.
+
+```{r}
+summary(data_train)[,2:7]
+summary(data_test)[,2:7]
+```
+
+### Entrenamiento del modelo
+
+En primer lugar, fijamos la semilla generadora:
+
+```{r}
+set.seed(params$seed.clsfier)
+```
+
+
+***DE 4 NODOS***
+
+```{r}
+# Construcción del modelo
+model_ann4 <- neuralnet(class ~ .,
+                        data = data_train,
+                        hidden = 4,
+                        linear.output = FALSE)
+
+# Visualización del modelo
+plot(model_ann4, rep = "best")
+```
+
+***DE 5 NODOS***
+
+```{r}
+# Construcción del modelo
+model_ann5 <- neuralnet(class ~ .,
+                        data = data_train,
+                        hidden = 5,
+                        linear.output = FALSE)
+
+# Visualización del modelo
+plot(model_ann5, rep = "best")
+```
+
+
+### Predicción y evaluación
+
+***DE 4 NODOS***
+
+
+```{r}
+p4 <- neuralnet::compute(model_ann4, data_test)$net.result
+
+# Ahora pasamos el output de binario a categórico
+maxidx <- function(arr) {
+    return(which(arr == max(arr)))
+}
+
+idx <- apply(p4, 1, maxidx)
+prediction <- c("-", "+")[idx]
+res <- table(prediction, data_test$class)
+
+# Matriz de confusión
+cmatrix4 <- confusionMatrix(res, positive = "+")
+cmatrix4
+```
+
+```{r}
+# Curva ROC
+test_pred4 <- predict(model_ann4, data_test_nolab, type = "raw")
+
+# Calculamos probabilidad clase positiva y construimos curva ROC
+pred4 <- prediction(predictions = test_pred4[,2], labels = data_test_labels)
+perf4 <- performance(pred4, measure = "tpr", x.measure = "fpr")
+
+plot(perf4, main = "ROC curve 4 nodes", col = "red", lwd=3, colorize = TRUE)
+abline(a=0, b=1, lwd=2, lty=2)
+```
+
+```{r}
+# Área bajo la curva
+perf.auc4 <- performance(pred4, measure = "auc")
+perf.auc4@y.values
+```
+
+
+***DE 5 NODOS***
+
+```{r}
+p5 <- neuralnet::compute(model_ann5, data_test)$net.result
+
+# Ahora pasamos el output de binario a categórico
+maxidx <- function(arr) {
+    return(which(arr == max(arr)))
+}
+
+idx <- apply(p5, 1, maxidx)
+prediction <- c("-", "+")[idx]
+res <- table(prediction, data_test$class)
+
+# Matriz de confusión
+cmatrix5 <- confusionMatrix(res, positive = "+")
+cmatrix5
+```
+
+
+```{r}
+# Curva ROC
+test_pred5 <- predict(model_ann5, data_test_nolab, type = "raw")
+
+# Calculamos probabilidad clase positiva y construimos curva ROC
+pred5 <- prediction(predictions = test_pred5[,2], labels = data_test_labels)
+perf5 <- performance(pred5, measure = "tpr", x.measure = "fpr")
+
+plot(perf5, main = "ROC curve 5 nodes", col = "red", lwd=3, colorize = TRUE)
+abline(a=0, b=1, lwd=2, lty=2)
+```
+
+```{r}
+# Área bajo la curva
+perf.auc5 <- performance(pred5, measure = "auc")
+perf.auc5@y.values
+```
+
+### Conclusión algoritmo
+
+| Nodes | AUC | Accuracy | Error rate | Sensivity | Specificity | Kappa |
+|-------|-----|----------|------------|-----------|-------------|-------|
+| 4 | 97.71 | 88.57 | 11.43 | 88.24 | 88.89 | 77.12 |
+| 5 | 94.77 | 88.57 | 11.43 | 94.12 | 83.33 | 77.20 |
+
+
+Tras observar los parámetros obtenidos de las dos opciones diferentes, podríamos decir que tanto la elección de 4 nodos como de 5 obtienen resultados muy similares. Sin embargo, podríamos decir que con 5 nodos se obtiene un clasificador bastante bueno (observando el valor de AUC) a la par que bueno en cuanto a la concordancia entre las predicciones y los valores verdaderos (Kappa). Además, se obtiene una mayor sensibilidad que con 4 nodos. Aún así, es posible que se obtuvieran mejores resultados añadiendo más capas.
+
+
+
+\pagebreak
+
+## Support Vector Machine
+
+### Entrenamiento modelo
+
+***KERNEL LINEAL***
+
+```{r}
+# Kernel lineal
+clasific_lineal <- ksvm(class ~ ., data = data_train,
+                        kernel = "vanilladot")
+clasific_lineal
+```
+
+
+***KERNEL RBF (RADIAL BASIS)***
+
+```{r}
+# Kernel lineal
+clasific_rbf <- ksvm(class ~ ., data = data_train,
+                        kernel = "rbfdot")
+clasific_rbf
+```
+
+
+### Predicción y evaluación
+
+```{r}
+predictions_lineal <- predict(clasific_lineal, data_test)
+predictions_rbf <- predict(clasific_rbf, data_test)
+```
+
+Veremos ahora las matrices de confusión.
+
+```{r}
+# Lineal
+cmatrix_lineal <- confusionMatrix(predictions_lineal, data_test$class,
+                                  positive = "+")
+cmatrix_lineal
+```
+
+
+```{r}
+# rbf
+cmatrix_rbf <- confusionMatrix(predictions_rbf, data_test$class,
+                               positive = "+")
+cmatrix_rbf
+```
+
+### Conclusión algoritmo
+
+| Kernel | Accuracy | Error rate | Sensivity | Specificity | Kappa |
+|--------|----------|------------|-----------|-------------|-------|
+| Lineal | 88.57 | 11.43 | 94.12 | 83.33 | 77.20 |
+| rbf | 94.29 | 5.71 | 94.12 | 94.44 | 88.56 |
+
+
+En el caso del algoritmo Support Vector Machine, podemos observar que el kernel rbf funciona muy bien para clasificar estos datos, ya que se consigue una accuracy del 94.29% (y por tanto una tasa de error del 5.71%), una sensibilidad y especificidad altas y un muy buen valor del estadístico kappa.
+
+
+
+\pagebreak
+
+## Árbol de Decisión
+
+### Entrenamiento del modelo
+
+***BOOSTING DESACTIVADO***
+
+```{r}
+model_b.desact <- C5.0(formula = class ~.,
+                       data = data_train,
+                       trials = 1,
+                       rules = FALSE,
+                       control = C5.0Control(seed = 123))
+model_b.desact
+summary(model_b.desact)
+```
+
+```{r}
+# Visualización del modelo
+plot(model_b.desact)
+```
+
+
+***BOOSTING ACTIVADO***
+
+En este caso elejimos el valor de trials como 10, porque es el valor estándar, ya que según investigaciones reduce las tasas de error en los datos de prueba un 25% aproximadamente.
+
+```{r}
+model_b.act <- C5.0(formula = class ~.,
+                       data = data_train,
+                       trials = 10,
+                       rules = FALSE,
+                       control = C5.0Control(seed = 123))
+model_b.act
+summary(model_b.act)
+```
+
+```{r}
+# Visualización del modelo
+plot(model_b.act)
+```
+
+
+
+### Predicción y evaluación
+
+```{r}
+# Boosting desactivado
+
+predict_b.desact <- predict(model_b.desact, data_test)
+cmatrix_b.desact <- confusionMatrix(predict_b.desact, data_test$class,
+                                    positive = "+")
+cmatrix_b.desact
+```
+
+```{r}
+# Boosting activado
+
+predict_b.act <- predict(model_b.act, data_test)
+cmatrix_b.act <- confusionMatrix(predict_b.act, data_test$class,
+                                    positive = "+")
+cmatrix_b.act
+```
+
+### Conclusión del algoritmo
+
+| Boosting | Accuracy | Error rate | Sensivity | Specificity | Kappa |
+|---------|----------|------------|-----------|-------------|-------|
+| Desactivado | 88.57 | 11.43 | 82.35 | 94.44 | 77.05 |
+| Activado | 97.14 | 2.86 | 94.12 | 100 | 94.27 |
+
+
+En este caso, se obtiene un mejor y muy buen rendimiento con el boosting activado. Se obtienen valores de los parámetros como una accuracy del 97.14% o una especificidad del 100%, así como un valor de kappa del 94.27% que demuestran que este algoritmo clasifica muy bien estos datos.
+
+
+
+\pagebreak
+
+## Random Forest
+
+### Entrenamiento modelo
+
+```{r}
+# Semilla de aleatoriedad para la clasificación
+set.seed(params$seed.clsfier)
+```
+
+
+***n = 50***
+
+```{r}
+model_rf50 <- randomForest(class ~.,
+                           data = data_train,
+                           ntree = 50)
+print(model_rf50)
+```
+
+En el bosque hay 50 árboles y se probó 15 variables en cada división.
+
+```{r}
+# Visualización modelo
+plot(model_rf50)
+```
+
+La línea negra representa el OOB, la línea roja el error al intentar predecir la clase y la línea roja el error al intentar predecir la clase -.
+
+
+***n = 100***
+
+```{r}
+model_rf100 <- randomForest(class ~.,
+                           data = data_train,
+                           ntree = 100)
+print(model_rf100)
+```
+
+En el bosque hay 100 árboles y se probó 15 variables en cada división.
+
+```{r}
+# Visualización modelo
+plot(model_rf100)
+```
+
+
+### Predicción y evaluación
+
+***n = 50***
+
+```{r}
+predict_rf50 <- predict(model_rf50, data_test)
+confusionMatrix(data_test$class, predict_rf50)
+```
+
+
+***n = 100***
+
+```{r}
+predict_rf100 <- predict(model_rf100, data_test)
+confusionMatrix(data_test$class, predict_rf100)
+```
+
+
+### Conclusión del algoritmo
+
+| n | Accuracy | Error rate | Sensivity | Specificity | Kappa |
+|---|----------|------------|-----------|-------------|-------|
+| 50 | 94.29 | 5.71 | 94.44 | 94.12 | 88.56 |
+| 100 | 85.71 | 14.29 | 84.21 | 87.50 | 71.36 |
+
+
+Al igual que en el algorimo anterior, la diferencia de rendimiento entre elegir 50 o 100 árboles en el bosque es bastante grande. En este caso, se obtienen muy buenos rendimientos con 50 árboles, con una accuracy del 94.29% y valores altos de especificidad, sensibilidad y el estadístico Kappa.
+
+
+\pagebreak
+
+
+# Discusión y conclusión
+
+Tras haber explorado dentro de cada algoritmo cuáles son los parámetros con los que se obtienen mejores resultados, realizamos una tabla comparativa entre los diferentes algoritmos:
+
+
+| Algorithm | value | AUC | Accuracy | Error rate | Sensivity | Specificity | Kappa |
+|-----------|-------|-----|----------|------------|-----------|-------------|-------|
+| k-NN | k = 7 | 89.2 | 82.86 | 17.14 | 94.12 | 72.22 | 65.91 |
+| Naive Bayes | Laplace = 0 | 88.57 | 93.79 | 11.43 | 82.35 | 94.44 | 77.05 |
+| ANN | 5 nodes | 94.77 | 88.57 | 11.43 | 94.12 | 83.33 | 77.20 |
+| SVM | rbf | - | 94.29 | 5.71 | 94.12 | 94.44 | 88.56 |
+| Classification Tree | Boost. act. | - | 97.14 | 2.86 | 94.12 | 100 | 94.27 |
+| Random Forest | n = 50 | - | 94.29 | 5.71 | 94.44 | 94.12 | 88.56 |
+
+
+En general, no se han obtenido malas clasificaciones con ninguno de los algoritmos. Sin embargo, con los últimos tres algoritmos implementados (Support Vector Machine, Classification Tree y Random Forest) se obtiene un mejor rendimiento. 
+
+En concreto y según el estudio llevado a cabo, el mejor clasificador para estos datos es el árbol de clasificación con el boosting activado, ya que se obtiene una accuracy del 97.14% y una sensibilidad del 94.12%. Además, se obtiene una especificidad del 100%, por lo que todas las secuencias clasificadas como no promotoras, no lo eran. También se obtiene un valor del estadístico Kappa de 94.27. Este estadístico indica la concordancia entre las predicciones y los valores verdaderos, por lo que en este caso, esta concordancia es muy buena.
+
+Si se observa el gráfico del modelo en el apartado correspondiente, parece que el algoritmo ha encontrado un patrón de 0 y 1 en unas determinadas variables que le ayuda a discernir entre las secuencias que son promotoras y las que no.
+
+
+\pagebreak
+
+# Referencias
